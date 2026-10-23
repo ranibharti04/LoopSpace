@@ -450,3 +450,56 @@ drop trigger if exists on_impact_transaction_created on public.impact_transactio
 create trigger on_impact_transaction_created
   after insert on public.impact_transactions
   for each row execute procedure public.handle_impact_reward();
+
+-- ----------------------------------------------------------------------------
+-- RPC HELPER: Increment resource views safely
+-- ----------------------------------------------------------------------------
+create or replace function public.increment_resource_views(resource_id uuid)
+returns void as $$
+begin
+  update public.resources
+  set views_count = coalesce(views_count, 0) + 1
+  where id = resource_id;
+end;
+$$ language plpgsql security definer;
+
+-- ----------------------------------------------------------------------------
+-- RPC HELPER: User account self-deletion workflow
+-- ----------------------------------------------------------------------------
+create or replace function public.delete_user_account()
+returns void as $$
+begin
+  delete from auth.users
+  where id = auth.uid();
+end;
+$$ language plpgsql security definer;
+
+-- ----------------------------------------------------------------------------
+-- STORAGE BUCKET CONFIGURATION (for resource-images)
+-- ----------------------------------------------------------------------------
+insert into storage.buckets (id, name, public)
+values ('resource-images', 'resource-images', true)
+on conflict (id) do update set public = true;
+
+-- Storage RLS: Anyone can read images
+create policy "Public Access to Resource Images"
+  on storage.objects for select
+  using (bucket_id = 'resource-images');
+
+-- Storage RLS: Authenticated users can upload to resource-images
+create policy "Authenticated users can upload resource images"
+  on storage.objects for insert
+  to authenticated
+  with check (bucket_id = 'resource-images');
+
+-- Storage RLS: Users can update or delete their own uploads
+create policy "Users can update own uploads"
+  on storage.objects for update
+  to authenticated
+  using (bucket_id = 'resource-images' and auth.uid()::text = (storage.foldername(name))[2]);
+
+create policy "Users can delete own uploads"
+  on storage.objects for delete
+  to authenticated
+  using (bucket_id = 'resource-images' and auth.uid()::text = (storage.foldername(name))[2]);
+
