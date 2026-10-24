@@ -1,10 +1,19 @@
+
 "use client";
 
-import React, { createContext, useContext, useEffect, useState } from "react";
+import React, {
+  createContext,
+  useContext,
+  useEffect,
+  useState,
+} from "react";
 import { Profile } from "@/types";
 import { DEMO_PROFILES } from "@/lib/demo-data";
 import { createClient } from "@/lib/supabase/client";
-import { ALLOWED_EMAIL_DOMAIN, isSupabaseConfigured } from "@/lib/supabase/config";
+import {
+  ALLOWED_EMAIL_DOMAIN,
+  isSupabaseConfigured,
+} from "@/lib/supabase/config";
 
 interface AuthContextType {
   user: Profile | null;
@@ -30,95 +39,175 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [user, setUser] = useState<Profile | null>(DEMO_PROFILES[0]); // Default to Alex Chen for instant interactivity
-  const [isLoading, setIsLoading] = useState<boolean>(true);
   const isSupabaseLive = isSupabaseConfigured();
 
-  useEffect(() => {
-    async function initAuth() {
-      if (isSupabaseLive) {
-        try {
-          const supabase = createClient();
-          const { data: { session } } = await supabase.auth.getSession();
-          if (session?.user) {
-            const { data: profile } = await supabase
-              .from("profiles")
-              .select("*")
-              .eq("id", session.user.id)
-              .single();
+  const [user, setUser] = useState<Profile | null>(
+    isSupabaseLive ? null : DEMO_PROFILES[0]
+  );
+  const [isLoading, setIsLoading] = useState(true);
 
-            if (profile) {
-              setUser(profile as Profile);
-            }
-          } else {
-            // Check localStorage demo user or keep default
-            const savedUserId = localStorage.getItem("loopspace_demo_user_id");
-            const found = DEMO_PROFILES.find((p) => p.id === savedUserId);
-            if (found) setUser(found);
-          }
-        } catch {
-          // Fallback to local
-        }
-      } else {
-        const savedUserId = typeof window !== "undefined" ? localStorage.getItem("loopspace_demo_user_id") : null;
+  useEffect(() => {
+    let active = true;
+
+    async function initAuth() {
+      if (!isSupabaseLive) {
+        const savedUserId = localStorage.getItem("loopspace_demo_user_id");
         const found = DEMO_PROFILES.find((p) => p.id === savedUserId);
-        if (found) setUser(found);
+
+        if (active) {
+          setUser(found ?? DEMO_PROFILES[0]);
+          setIsLoading(false);
+        }
+        return;
       }
-      setIsLoading(false);
+
+      const supabase = createClient();
+
+      const loadProfile = async (userId: string) => {
+        const { data, error } = await supabase
+          .from("profiles")
+          .select("*")
+          .eq("id", userId)
+          .maybeSingle();
+
+        if (!active) return;
+
+        if (error) {
+          console.error("Unable to load profile:", error.message);
+          setUser(null);
+          return;
+        }
+
+        setUser(data as Profile | null);
+      };
+
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+
+      if (session?.user) {
+        await loadProfile(session.user.id);
+      } else if (active) {
+        setUser(null);
+      }
+
+      if (active) setIsLoading(false);
+
+      const {
+        data: { subscription },
+      } = supabase.auth.onAuthStateChange((_event, session) => {
+        if (!active) return;
+
+        if (!session?.user) {
+          setUser(null);
+          return;
+        }
+
+        // Defer the profile query to avoid doing Supabase queries
+        // inside the auth state-change callback.
+        setTimeout(() => {
+          if (active) void loadProfile(session.user.id);
+        }, 0);
+      });
+
+      return subscription;
     }
 
-    initAuth();
+    let unsubscribe: (() => void) | undefined;
+
+    initAuth()
+      .then((subscription) => {
+        if (subscription) {
+          unsubscribe = () => subscription.unsubscribe();
+        }
+      })
+      .catch((error) => {
+        console.error("Authentication initialization failed:", error);
+        if (active) {
+          setUser(null);
+          setIsLoading(false);
+        }
+      });
+
+    return () => {
+      active = false;
+      unsubscribe?.();
+    };
   }, [isSupabaseLive]);
 
   const login = async (email: string, password?: string) => {
     setIsLoading(true);
 
-    if (ALLOWED_EMAIL_DOMAIN && !email.toLowerCase().endsWith(ALLOWED_EMAIL_DOMAIN.toLowerCase())) {
-      setIsLoading(false);
-      throw new Error(`Email must end with your campus domain: ${ALLOWED_EMAIL_DOMAIN}`);
-    }
-
-    if (isSupabaseLive && password) {
-      const supabase = createClient();
-      const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-      if (error) {
-        setIsLoading(false);
-        throw new Error(error.message);
+    try {
+      if (
+        ALLOWED_EMAIL_DOMAIN &&
+        !email.toLowerCase().endsWith(ALLOWED_EMAIL_DOMAIN.toLowerCase())
+      ) {
+        throw new Error(
+          `Email must end with your campus domain: ${ALLOWED_EMAIL_DOMAIN}`
+        );
       }
 
-      if (data.user) {
-        const { data: profile } = await supabase
+      if (isSupabaseLive) {
+        if (!password) throw new Error("Please enter your password.");
+
+        const supabase = createClient();
+        const { data, error } = await supabase.auth.signInWithPassword({
+          email: email.trim(),
+          password,
+        });
+
+        if (error) throw new Error(error.message);
+
+        if (!data.session) {
+          throw new Error("Please verify your email before signing in.");
+        }
+
+        const { data: profile, error: profileError } = await supabase
           .from("profiles")
           .select("*")
           .eq("id", data.user.id)
-          .single();
-        if (profile) setUser(profile as Profile);
-      }
-    } else {
-      // In demo mode, match demo profile or create dynamic session
-      const found = DEMO_PROFILES.find((p) => p.email.toLowerCase() === email.toLowerCase());
-      if (found) {
-        setUser(found);
-        localStorage.setItem("loopspace_demo_user_id", found.id);
+          .maybeSingle();
+
+        if (profileError) throw new Error(profileError.message);
+
+        if (!profile) {
+          throw new Error(
+            "Your account is signed in, but its profile is missing. Please contact support."
+          );
+        }
+
+        setUser(profile as Profile);
       } else {
-        const customUser: Profile = {
-          id: `u-${Date.now()}`,
-          full_name: email.split("@")[0],
-          email,
-          college_name: "Campus Central University",
-          department: "General Studies",
-          is_phone_public: false,
-          impact_points: 0,
-          role: email.startsWith("admin") ? "admin" : "user",
-          is_suspended: false,
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        };
-        setUser(customUser);
-        localStorage.setItem("loopspace_demo_user_id", customUser.id);
+        const found = DEMO_PROFILES.find(
+          (p) => p.email.toLowerCase() === email.toLowerCase()
+        );
+
+        if (found) {
+          setUser(found);
+          localStorage.setItem("loopspace_demo_user_id", found.id);
+        } else {
+          const customUser: Profile = {
+            id: `u-${Date.now()}`,
+            full_name: email.split("@")[0],
+            email,
+            college_name: "Campus Central University",
+            department: "General Studies",
+            is_phone_public: false,
+            impact_points: 0,
+            role: email.startsWith("admin") ? "admin" : "user",
+            is_suspended: false,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          };
+
+          setUser(customUser);
+          localStorage.setItem("loopspace_demo_user_id", customUser.id);
+        }
       }
+    } finally {
+      setIsLoading(false);
     }
-    setIsLoading(false);
   };
 
   const signUp = async (data: {
@@ -128,81 +217,69 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     collegeName?: string;
     department?: string;
   }) => {
-    setIsLoading(true);
-
-    if (ALLOWED_EMAIL_DOMAIN && !data.email.toLowerCase().endsWith(ALLOWED_EMAIL_DOMAIN.toLowerCase())) {
-      setIsLoading(false);
-      throw new Error(`Email must end with your campus domain: ${ALLOWED_EMAIL_DOMAIN}`);
+    if (!isSupabaseLive) {
+      throw new Error(
+        "Supabase is not configured. Please check your .env.local file."
+      );
     }
 
-    if (isSupabaseLive && data.password) {
+    if (!data.password) {
+      throw new Error("Please enter a password.");
+    }
+
+    setIsLoading(true);
+
+    try {
+      if (
+        ALLOWED_EMAIL_DOMAIN &&
+        !data.email.toLowerCase().endsWith(ALLOWED_EMAIL_DOMAIN.toLowerCase())
+      ) {
+        throw new Error(
+          `Email must end with your campus domain: ${ALLOWED_EMAIL_DOMAIN}`
+        );
+      }
+
       const supabase = createClient();
-      const { data: authData, error } = await supabase.auth.signUp({
-        email: data.email,
+
+      const { error } = await supabase.auth.signUp({
+        email: data.email.trim(),
         password: data.password,
         options: {
           data: {
             full_name: data.fullName,
-            college_name: data.collegeName || "Campus Central University",
-            department: data.department || "General Studies",
+            college_name:
+              data.collegeName || "State University of Technology",
+            department:
+              data.department || "Computer Science & Engineering",
           },
         },
       });
 
-      if (error) {
-        setIsLoading(false);
-        throw new Error(error.message);
-      }
+      if (error) throw new Error(error.message);
 
-      if (authData.user) {
-        const newProfile: Profile = {
-          id: authData.user.id,
-          full_name: data.fullName,
-          email: data.email,
-          college_name: data.collegeName || "Campus Central University",
-          department: data.department || "General Studies",
-          is_phone_public: false,
-          impact_points: 0,
-          role: "user",
-          is_suspended: false,
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        };
-        setUser(newProfile);
-      }
-    } else {
-      const newProfile: Profile = {
-        id: `u-${Date.now()}`,
-        full_name: data.fullName,
-        email: data.email,
-        college_name: data.collegeName || "State University of Technology",
-        department: data.department || "Computer Science & Engineering",
-        is_phone_public: false,
-        impact_points: 0,
-        role: data.email.startsWith("admin") ? "admin" : "user",
-        is_suspended: false,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      };
-      setUser(newProfile);
-      localStorage.setItem("loopspace_demo_user_id", newProfile.id);
+      // Do not set the user here. Signup must be verified first.
+    } finally {
+      setIsLoading(false);
     }
-    setIsLoading(false);
   };
 
   const logout = async () => {
     if (isSupabaseLive) {
       const supabase = createClient();
-      await supabase.auth.signOut();
+      const { error } = await supabase.auth.signOut();
+      if (error) throw new Error(error.message);
     }
+
     setUser(null);
+
     if (typeof window !== "undefined") {
       localStorage.removeItem("loopspace_demo_user_id");
     }
   };
 
   const updateProfile = async (updates: Partial<Profile>) => {
-    if (!user) return;
+    if (!user) throw new Error("Please sign in first.");
+
     if (isSupabaseLive) {
       const supabase = createClient();
       const { data, error } = await supabase
@@ -211,25 +288,39 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         .eq("id", user.id)
         .select()
         .single();
+
       if (error) throw new Error(error.message);
       if (data) setUser(data as Profile);
     } else {
-      setUser({ ...user, ...updates, updated_at: new Date().toISOString() });
+      setUser({
+        ...user,
+        ...updates,
+        updated_at: new Date().toISOString(),
+      });
     }
   };
 
   const deleteAccount = async () => {
-    if (!user) return;
+    if (!user) throw new Error("Please sign in first.");
+
     if (isSupabaseLive) {
       const supabase = createClient();
-      await supabase.rpc("delete_user_account");
+      const { error } = await supabase.rpc("delete_user_account");
+
+      if (error) throw new Error(error.message);
+
       await supabase.auth.signOut();
     }
-    logout();
+
+    setUser(null);
+    localStorage.removeItem("loopspace_demo_user_id");
   };
 
   const switchDemoUser = (profileId: string) => {
+    if (isSupabaseLive) return;
+
     const found = DEMO_PROFILES.find((p) => p.id === profileId);
+
     if (found) {
       setUser(found);
       localStorage.setItem("loopspace_demo_user_id", found.id);
@@ -263,8 +354,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
 export function useAuth() {
   const context = useContext(AuthContext);
+
   if (!context) {
     throw new Error("useAuth must be used within an AuthProvider");
   }
+
   return context;
 }
