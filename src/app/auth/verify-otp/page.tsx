@@ -1,11 +1,11 @@
 
 "use client";
 
-import { useState } from "react";
+import { Suspense, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 
-export default function VerifyOtpPage() {
+function VerifyOtpForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const email = searchParams.get("email") || "";
@@ -26,6 +26,10 @@ export default function VerifyOtpPage() {
         throw new Error("Email is missing. Please sign up again.");
       }
 
+      if (!/^\d{8}$/.test(otp.trim())) {
+        throw new Error("Please enter the complete 8-digit verification code.");
+      }
+
       const supabase = createClient();
 
       const { data, error } = await supabase.auth.verifyOtp({
@@ -37,7 +41,9 @@ export default function VerifyOtpPage() {
       if (error) throw error;
 
       if (!data.session) {
-        throw new Error("Verification succeeded, but no session was created. Please sign in.");
+        throw new Error(
+          "Email verified, but no session was created. Please sign in."
+        );
       }
 
       setMessage("Email verified successfully!");
@@ -63,6 +69,7 @@ export default function VerifyOtpPage() {
       }
 
       const supabase = createClient();
+
       const { error } = await supabase.auth.resend({
         type: "signup",
         email,
@@ -70,6 +77,7 @@ export default function VerifyOtpPage() {
 
       if (error) throw error;
 
+      setOtp("");
       setMessage("A new verification code has been requested. Check your inbox.");
     } catch (err: unknown) {
       setError(
@@ -88,17 +96,24 @@ export default function VerifyOtpPage() {
         </h1>
 
         <p className="text-sm text-center text-slate-600 dark:text-slate-300">
-          Enter the verification code sent to <strong>{email || "your email"}</strong>.
+          Enter the verification code sent to{" "}
+          <strong>{email || "your email"}</strong>.
         </p>
 
         {error && (
-          <p role="alert" className="rounded-lg bg-red-50 p-3 text-sm text-red-700">
+          <p
+            role="alert"
+            className="rounded-lg bg-red-50 p-3 text-sm text-red-700"
+          >
             {error}
           </p>
         )}
 
         {message && (
-          <p role="status" className="rounded-lg bg-green-50 p-3 text-sm text-green-700">
+          <p
+            role="status"
+            className="rounded-lg bg-green-50 p-3 text-sm text-green-700"
+          >
             {message}
           </p>
         )}
@@ -112,8 +127,11 @@ export default function VerifyOtpPage() {
             maxLength={8}
             required
             value={otp}
-            onChange={(e) => setOtp(e.target.value.replace(/\D/g, ""))}
+            onChange={(e) =>
+              setOtp(e.target.value.replace(/\D/g, "").slice(0, 8))
+            }
             placeholder="Enter 8-digit OTP"
+            aria-label="8-digit verification code"
             className="w-full rounded-xl border p-3 text-center text-lg tracking-widest text-slate-900"
           />
 
@@ -136,5 +154,19 @@ export default function VerifyOtpPage() {
         </button>
       </div>
     </main>
+  );
+}
+
+export default function VerifyOtpPage() {
+  return (
+    <Suspense
+      fallback={
+        <main className="min-h-[80vh] flex items-center justify-center">
+          <p>Loading verification page...</p>
+        </main>
+      }
+    >
+      <VerifyOtpForm />
+    </Suspense>
   );
 }
